@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Test binaries
+test_mobi
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
