@@ -1,0 +1,62 @@
+{
+  "version": "21.0.0",
+  "description": "Canonical test vectors for Mobi Protocol v21.0.0",
+  "vectors": [
+    {
+      "name": "all_zeros",
+      "description": "All-zero public key (round 0 rejected, round 1 accepted)",
+      "pubkey_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expected": {
+        "full": "587135537154686717107",
+        "display": "587135537154",
+        "extended": "587135537154686",
+        "lng": "587135537154686717",
+        "display_formatted": "587-135-537-154",
+        "full_formatted": "587-135-537-154-686-717-107"
+      },
+      "notes": "Round 0 hash starts with 0x66687a... which is >= 10^21, so rejected"
+    },
+    {
+      "name": "abandon_mnemonic",
+      "description": "BIP-85 derived Nostr key from 'abandon abandon ... about' mnemonic",
+      "pubkey_hex": "17162c921dc4d2518f9a101db33695df1afb56ab82f5ff3e5da6eec3ca5cd917",
+      "expected": {
+        "full": "879044656584686196443",
+        "display": "879044656584",
+        "extended": "879044656584686",
+        "lng": "879044656584686196",
+        "display_formatted": "879-044-656-584",
+        "full_formatted": "879-044-656-584-686-196-443"
+      },
+      "notes": "Standard BIP-85 test vector"
+    },
+    {
+      "name": "all_ones",
+      "description": "All-ones public key (0xff...ff)",
+      "pubkey_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected": {
+        "full": "212465100827220971331",
+        "display": "212465100827",
+        "extended": "212465100827220",
+        "lng": "212465100827220971",
+        "display_formatted": "212-465-100-827",
+        "full_formatted": "212-465-100-827-220-971-331"
+      },
+      "notes": "Edge case: maximum pubkey value"
+    },
+    {
+      "name": "sequential_bytes",
+      "description": "Sequential bytes 0x00, 0x01, 0x02, ..., 0x1f",
+      "pubkey_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expected": {
+        "full": "466028911786694108954",
+        "display": "466028911786",
+        "extended": "466028911786694",
+        "lng": "466028911786694108",
+        "display_formatted": "466-028-911-786",
+        "full_formatted": "466-028-911-786-694-108-954"
+      },
+      "notes": "Predictable input pattern"
+    }
+  ]
+}
