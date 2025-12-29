@@ -1,21 +1,35 @@
 /*
- * MobiNumber Protocol v1.0 - Reference Implementation
+ * Mobi Protocol v21.0.0 - Reference Implementation
  *
- * Derives a 12-digit human-readable identifier from a secp256k1 public key.
- * Uses rejection sampling to ensure uniform distribution across all 10^12 values.
+ * Derives a 21-digit identifier from a secp256k1 public key.
+ * Pure math. No network. Deterministic. Uniform distribution.
  *
- * Copyright (c) 2024 OBIVERSE LLC
+ * Algorithm (rejection sampling for zero bias):
+ *   1. For round = 0 to 255:
+ *      a. If round == 0: hash = SHA256(pubkey)
+ *         Else: hash = SHA256(pubkey || round)
+ *      b. value = first 9 bytes as big-endian 72-bit integer
+ *      c. If value < 10^21: return zero_pad(value, 21)
+ *   2. Unreachable (probability < 10^-25)
+ *
+ * Why rejection sampling?
+ *   - 2^72 = 4.72 × 10^21, so ~21% of 72-bit values are valid
+ *   - Modulo would bias values 0 to 722... by ~25%
+ *   - Rejection sampling ensures perfect uniformity
+ *   - Expected rounds: ~4.7 (fast in practice)
+ *
+ * Copyright (c) 2024-2025 OBIVERSE LLC
  * Licensed under MIT OR Apache-2.0
  */
 
 #include "mobi.h"
 #include <string.h>
 #include <ctype.h>
+#include <stdio.h>
 
-/*
- * SHA-256 Implementation (standalone, no dependencies)
- * Based on FIPS 180-4
- */
+/* ============================================================================
+ * SHA-256 IMPLEMENTATION (FIPS 180-4, standalone)
+ * ============================================================================ */
 
 #define SHA256_BLOCK_SIZE 64
 #define SHA256_DIGEST_SIZE 32
@@ -71,7 +85,6 @@ static void sha256_transform(sha256_ctx *ctx, const uint8_t *block) {
     uint32_t t1, t2;
     int i;
 
-    /* Prepare message schedule */
     for (i = 0; i < 16; i++) {
         w[i] = ((uint32_t)block[i * 4] << 24) |
                ((uint32_t)block[i * 4 + 1] << 16) |
@@ -82,47 +95,24 @@ static void sha256_transform(sha256_ctx *ctx, const uint8_t *block) {
         w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
     }
 
-    /* Initialize working variables */
-    a = ctx->state[0];
-    b = ctx->state[1];
-    c = ctx->state[2];
-    d = ctx->state[3];
-    e = ctx->state[4];
-    f = ctx->state[5];
-    g = ctx->state[6];
-    h = ctx->state[7];
+    a = ctx->state[0]; b = ctx->state[1]; c = ctx->state[2]; d = ctx->state[3];
+    e = ctx->state[4]; f = ctx->state[5]; g = ctx->state[6]; h = ctx->state[7];
 
-    /* Main loop */
     for (i = 0; i < 64; i++) {
         t1 = h + EP1(e) + CH(e, f, g) + K256[i] + w[i];
         t2 = EP0(a) + MAJ(a, b, c);
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
     }
 
-    /* Add to state */
-    ctx->state[0] += a;
-    ctx->state[1] += b;
-    ctx->state[2] += c;
-    ctx->state[3] += d;
-    ctx->state[4] += e;
-    ctx->state[5] += f;
-    ctx->state[6] += g;
-    ctx->state[7] += h;
+    ctx->state[0] += a; ctx->state[1] += b; ctx->state[2] += c; ctx->state[3] += d;
+    ctx->state[4] += e; ctx->state[5] += f; ctx->state[6] += g; ctx->state[7] += h;
 }
 
 static void sha256_update(sha256_ctx *ctx, const uint8_t *data, size_t len) {
     size_t i, idx;
-
     idx = (size_t)(ctx->count & 0x3F);
     ctx->count += len;
-
     for (i = 0; i < len; i++) {
         ctx->buffer[idx++] = data[i];
         if (idx == SHA256_BLOCK_SIZE) {
@@ -138,30 +128,19 @@ static void sha256_final(sha256_ctx *ctx, uint8_t *digest) {
     size_t idx;
     int i;
 
-    /* Save original bit count before padding corrupts it */
     bits = ctx->count * 8;
-
-    /* Get current buffer position */
     idx = (size_t)(ctx->count & 0x3F);
-
-    /* Copy current buffer to final block */
     memcpy(final_block, ctx->buffer, idx);
-
-    /* Add 0x80 padding byte */
     final_block[idx++] = 0x80;
 
-    /* Determine if we need one or two blocks */
     if (idx > 56) {
-        /* Need two blocks - zero rest of first, process, then second */
         memset(final_block + idx, 0, SHA256_BLOCK_SIZE - idx);
         sha256_transform(ctx, final_block);
         memset(final_block, 0, 56);
     } else {
-        /* Single block - zero up to length field */
         memset(final_block + idx, 0, 56 - idx);
     }
 
-    /* Append length in bits (big-endian, 8 bytes) */
     final_block[56] = (uint8_t)(bits >> 56);
     final_block[57] = (uint8_t)(bits >> 48);
     final_block[58] = (uint8_t)(bits >> 40);
@@ -171,10 +150,8 @@ static void sha256_final(sha256_ctx *ctx, uint8_t *digest) {
     final_block[62] = (uint8_t)(bits >> 8);
     final_block[63] = (uint8_t)(bits);
 
-    /* Process final block */
     sha256_transform(ctx, final_block);
 
-    /* Output digest (big-endian) */
     for (i = 0; i < 8; i++) {
         digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
         digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
@@ -190,9 +167,9 @@ static void sha256(const uint8_t *data, size_t len, uint8_t *digest) {
     sha256_final(&ctx, digest);
 }
 
-/*
- * Hex utilities
- */
+/* ============================================================================
+ * HEX UTILITIES
+ * ============================================================================ */
 
 static int hex_char_to_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -217,81 +194,151 @@ static int hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_
     return 0;
 }
 
+/* ============================================================================
+ * BIG NUMBER OPERATIONS (72-bit arithmetic, portable C99)
+ * ============================================================================ */
+
 /*
- * MobiNumber derivation with rejection sampling
+ * Math recap:
+ *   - 10^21 = 1,000,000,000,000,000,000,000 (22 decimal digits)
+ *   - 2^72  = 4,722,366,482,869,645,213,696 (22 decimal digits)
+ *   - 10^21 / 2^72 ≈ 0.212 (21.2% acceptance rate)
+ *   - Expected rounds for rejection sampling: ~4.7
  *
- * Algorithm:
- * 1. hash = SHA256(pubkey_bytes)
- * 2. Extract 5 bytes from hash[offset:offset+5] as big-endian u40
- * 3. If value >= 10^12, increment offset (mod 28) and retry
- * 4. Output: value as 12-digit zero-padded decimal string
- *
- * The rejection sampling ensures uniform distribution across all 10^12 values.
- * Expected iterations: ~1.1 (since 10^12 / 2^40 ≈ 0.909)
+ * We extract 9 bytes (72 bits), convert to decimal, check if < 10^21.
+ * Simple digit counting works: 10^21 has 22 digits, so accept if <= 21 digits.
  */
 
-#define MOBI_MAX_VALUE 1000000000000ULL  /* 10^12 */
-#define MOBI_HASH_WINDOW 5               /* bytes to extract */
-#define MOBI_MAX_OFFSET 28               /* SHA256_DIGEST_SIZE - MOBI_HASH_WINDOW + 1 */
-
-mobi_error_t mobi_derive_bytes(const uint8_t *pubkey, char *out) {
-    uint8_t hash[SHA256_DIGEST_SIZE];
-    uint64_t value;
-    int offset;
+/*
+ * Convert 9 bytes (72 bits) to decimal and check if < 10^21.
+ *
+ * Returns 1 if valid (value < 10^21), writes 21-digit zero-padded result.
+ * Returns 0 if should reject (value >= 10^21).
+ */
+static int try_convert_hash(const uint8_t *hash, char *out) {
+    uint8_t work[10] = {0};
+    char digits[24] = {0};
+    int num_digits = 0;
     int i;
 
-    if (pubkey == NULL || out == NULL) {
-        return MOBI_ERR_NULL_PTR;
+    /* Copy 9 bytes with leading zero for clean division */
+    for (i = 0; i < 9; i++) {
+        work[i + 1] = hash[i];
     }
 
-    /* Hash the public key */
-    sha256(pubkey, MOBI_PUBKEY_LEN, hash);
+    /* Extract digits via repeated division by 10 (big-endian long division) */
+    while (1) {
+        int all_zero = 1;
+        for (i = 0; i < 10; i++) {
+            if (work[i] != 0) { all_zero = 0; break; }
+        }
+        if (all_zero) break;
 
-    /* Rejection sampling loop */
-    for (offset = 0; offset < MOBI_MAX_OFFSET; offset++) {
-        /* Extract 5 bytes as big-endian u40 */
-        value = 0;
-        for (i = 0; i < MOBI_HASH_WINDOW; i++) {
-            value = (value << 8) | hash[offset + i];
+        uint32_t remainder = 0;
+        for (i = 0; i < 10; i++) {
+            uint32_t current = remainder * 256 + work[i];
+            work[i] = (uint8_t)(current / 10);
+            remainder = current % 10;
         }
 
-        /* Check if value is in valid range */
-        if (value < MOBI_MAX_VALUE) {
-            /* Convert to 12-digit string */
-            for (i = MOBI_NUMBER_LEN - 1; i >= 0; i--) {
-                out[i] = '0' + (value % 10);
-                value /= 10;
-            }
-            out[MOBI_NUMBER_LEN] = '\0';
+        /* Prepend digit (extracting from least significant) */
+        memmove(digits + 1, digits, (size_t)num_digits + 1);
+        digits[0] = '0' + (char)remainder;
+        num_digits++;
+    }
+
+    if (num_digits == 0) {
+        digits[0] = '0';
+        num_digits = 1;
+    }
+
+    /*
+     * Rejection check: value must be < 10^21
+     *
+     * 10^21 = "1" followed by 21 zeros = 22 decimal digits
+     * 2^72 max = 4,722,366,482,869,645,213,695 = 22 decimal digits
+     *
+     * If num_digits <= 21: value < 10^21, accept
+     * If num_digits == 22: value >= 10^21, reject
+     */
+    if (num_digits > 21) {
+        return 0;  /* Reject: value >= 10^21 */
+    }
+
+    /* Accept: left-pad with zeros to 21 digits */
+    int pad = 21 - num_digits;
+    memset(out, '0', (size_t)pad);
+    memcpy(out + pad, digits, (size_t)num_digits);
+    out[21] = '\0';
+    return 1;
+}
+
+/* ============================================================================
+ * CORE API IMPLEMENTATION
+ * ============================================================================ */
+
+/*
+ * Maximum rejection sampling rounds before giving up.
+ * Probability of reaching this: (1 - 0.212)^256 ≈ 10^-25
+ */
+#define MOBI_MAX_ROUNDS 256
+
+mobi_error_t mobi_derive_bytes(const uint8_t *pubkey, mobi_t *out) {
+    uint8_t hash[SHA256_DIGEST_SIZE];
+    uint8_t input[MOBI_PUBKEY_LEN + 1];  /* pubkey + round byte */
+    int round;
+
+    if (pubkey == NULL || out == NULL) {
+        return MOBI_ERR_NULL;
+    }
+
+    /* Copy pubkey for potential round-appending */
+    memcpy(input, pubkey, MOBI_PUBKEY_LEN);
+
+    /*
+     * Rejection sampling loop:
+     *   Round 0: hash = SHA256(pubkey)
+     *   Round N: hash = SHA256(pubkey || N)
+     *
+     * Accept if first 9 bytes of hash, as decimal, < 10^21.
+     * Expected rounds: ~4.7 (21.2% acceptance rate)
+     */
+    for (round = 0; round < MOBI_MAX_ROUNDS; round++) {
+        if (round == 0) {
+            sha256(pubkey, MOBI_PUBKEY_LEN, hash);
+        } else {
+            input[MOBI_PUBKEY_LEN] = (uint8_t)round;
+            sha256(input, MOBI_PUBKEY_LEN + 1, hash);
+        }
+
+        if (try_convert_hash(hash, out->full)) {
+            /* Success: extract prefix forms */
+            memcpy(out->display, out->full, MOBI_DISPLAY_LEN);
+            out->display[MOBI_DISPLAY_LEN] = '\0';
+
+            memcpy(out->extended, out->full, MOBI_EXTENDED_LEN);
+            out->extended[MOBI_EXTENDED_LEN] = '\0';
+
+            memcpy(out->lng, out->full, MOBI_LONG_LEN);
+            out->lng[MOBI_LONG_LEN] = '\0';
+
             return MOBI_OK;
         }
     }
 
     /*
-     * Extremely unlikely: all 28 windows exceeded 10^12.
-     * Probability: < (1 - 0.909)^28 ≈ 10^-29
-     * Fall back to modulo (still secure, just 0.0001% non-uniform)
+     * Unreachable in practice (probability < 10^-25).
+     * If somehow reached, return error rather than biased result.
      */
-    value = 0;
-    for (i = 0; i < MOBI_HASH_WINDOW; i++) {
-        value = (value << 8) | hash[i];
-    }
-    value = value % MOBI_MAX_VALUE;
-
-    for (i = MOBI_NUMBER_LEN - 1; i >= 0; i--) {
-        out[i] = '0' + (value % 10);
-        value /= 10;
-    }
-    out[MOBI_NUMBER_LEN] = '\0';
-    return MOBI_OK;
+    return MOBI_ERR_INVALID_LEN;  /* Reuse error code for this edge case */
 }
 
-mobi_error_t mobi_derive(const char *pubkey_hex, char *out) {
+mobi_error_t mobi_derive(const char *pubkey_hex, mobi_t *out) {
     uint8_t pubkey[MOBI_PUBKEY_LEN];
     size_t hex_len;
 
     if (pubkey_hex == NULL || out == NULL) {
-        return MOBI_ERR_NULL_PTR;
+        return MOBI_ERR_NULL;
     }
 
     hex_len = strlen(pubkey_hex);
@@ -306,83 +353,135 @@ mobi_error_t mobi_derive(const char *pubkey_hex, char *out) {
     return mobi_derive_bytes(pubkey, out);
 }
 
-mobi_error_t mobi_format(const char *mobi, char *out) {
-    int i, j;
+/* ============================================================================
+ * FORMATTING API IMPLEMENTATION
+ * ============================================================================ */
 
+mobi_error_t mobi_format_display(const mobi_t *mobi, char *out) {
     if (mobi == NULL || out == NULL) {
-        return MOBI_ERR_NULL_PTR;
+        return MOBI_ERR_NULL;
     }
 
-    if (strlen(mobi) != MOBI_NUMBER_LEN) {
-        return MOBI_ERR_INVALID_LEN;
-    }
-
-    /* Validate all digits */
-    for (i = 0; i < MOBI_NUMBER_LEN; i++) {
-        if (!isdigit((unsigned char)mobi[i])) {
-            return MOBI_ERR_INVALID_HEX;  /* Reuse error for invalid digit */
-        }
-    }
-
-    /* Format as XXX-XXX-XXX-XXX */
-    j = 0;
-    for (i = 0; i < MOBI_NUMBER_LEN; i++) {
-        if (i > 0 && i % 3 == 0) {
-            out[j++] = '-';
-        }
-        out[j++] = mobi[i];
-    }
-    out[j] = '\0';
+    /* Format: XXX-XXX-XXX-XXX */
+    sprintf(out, "%.3s-%.3s-%.3s-%.3s",
+            mobi->display, mobi->display + 3,
+            mobi->display + 6, mobi->display + 9);
 
     return MOBI_OK;
 }
 
-mobi_error_t mobi_normalize(const char *input, char *out) {
-    size_t len;
-    int i, j;
-
-    if (input == NULL || out == NULL) {
-        return MOBI_ERR_NULL_PTR;
+mobi_error_t mobi_format_extended(const mobi_t *mobi, char *out) {
+    if (mobi == NULL || out == NULL) {
+        return MOBI_ERR_NULL;
     }
 
-    len = strlen(input);
-
-    /* Extract digits only */
-    j = 0;
-    for (i = 0; i < (int)len && j < MOBI_NUMBER_LEN; i++) {
-        if (isdigit((unsigned char)input[i])) {
-            out[j++] = input[i];
-        } else if (input[i] != '-' && input[i] != ' ') {
-            /* Invalid character (not digit, hyphen, or space) */
-            return MOBI_ERR_INVALID_HEX;
-        }
-    }
-    out[j] = '\0';
-
-    /* Validate length */
-    if (j != MOBI_NUMBER_LEN) {
-        return MOBI_ERR_INVALID_LEN;
-    }
+    /* Format: XXX-XXX-XXX-XXX-XXX */
+    sprintf(out, "%.3s-%.3s-%.3s-%.3s-%.3s",
+            mobi->extended, mobi->extended + 3, mobi->extended + 6,
+            mobi->extended + 9, mobi->extended + 12);
 
     return MOBI_OK;
+}
+
+mobi_error_t mobi_format_full(const mobi_t *mobi, char *out) {
+    if (mobi == NULL || out == NULL) {
+        return MOBI_ERR_NULL;
+    }
+
+    /* Format: XXX-XXX-XXX-XXX-XXX-XXX-XXX */
+    sprintf(out, "%.3s-%.3s-%.3s-%.3s-%.3s-%.3s-%.3s",
+            mobi->full, mobi->full + 3, mobi->full + 6, mobi->full + 9,
+            mobi->full + 12, mobi->full + 15, mobi->full + 18);
+
+    return MOBI_OK;
+}
+
+/* ============================================================================
+ * PARSING API IMPLEMENTATION
+ * ============================================================================ */
+
+int mobi_normalize(const char *input, char *out, size_t out_len) {
+    size_t in_len;
+    int digit_count = 0;
+    size_t i;
+
+    if (input == NULL || out == NULL) {
+        return MOBI_ERR_NULL;
+    }
+
+    in_len = strlen(input);
+
+    /* Extract digits only, skip common separators */
+    for (i = 0; i < in_len && (size_t)digit_count < out_len - 1; i++) {
+        if (isdigit((unsigned char)input[i])) {
+            out[digit_count++] = input[i];
+        } else if (input[i] != '-' && input[i] != ' ' && input[i] != '.' &&
+                   input[i] != '(' && input[i] != ')') {
+            return MOBI_ERR_INVALID_CHAR;
+        }
+    }
+    out[digit_count] = '\0';
+
+    return digit_count;
 }
 
 int mobi_validate(const char *mobi) {
-    int i;
+    size_t len;
+    size_t i;
 
     if (mobi == NULL) {
         return 0;
     }
 
-    if (strlen(mobi) != MOBI_NUMBER_LEN) {
+    len = strlen(mobi);
+
+    /* Valid lengths: 12, 15, 18, 21 */
+    if (len != 12 && len != 15 && len != 18 && len != 21) {
         return 0;
     }
 
-    for (i = 0; i < MOBI_NUMBER_LEN; i++) {
+    /* All characters must be digits */
+    for (i = 0; i < len; i++) {
         if (!isdigit((unsigned char)mobi[i])) {
             return 0;
         }
     }
 
     return 1;
+}
+
+/* ============================================================================
+ * COMPARISON API IMPLEMENTATION
+ * ============================================================================ */
+
+int mobi_display_matches(const char *a, const char *b) {
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    if (strlen(a) < 12 || strlen(b) < 12) {
+        return 0;
+    }
+    return memcmp(a, b, 12) == 0;
+}
+
+int mobi_full_matches(const mobi_t *a, const mobi_t *b) {
+    if (a == NULL || b == NULL) {
+        return 0;
+    }
+    return memcmp(a->full, b->full, 21) == 0;
+}
+
+/* ============================================================================
+ * UTILITY API IMPLEMENTATION
+ * ============================================================================ */
+
+const char* mobi_strerror(mobi_error_t err) {
+    switch (err) {
+        case MOBI_OK:              return "Success";
+        case MOBI_ERR_NULL:        return "Null pointer argument";
+        case MOBI_ERR_INVALID_HEX: return "Invalid hexadecimal character";
+        case MOBI_ERR_INVALID_LEN: return "Invalid input length";
+        case MOBI_ERR_INVALID_CHAR:return "Invalid character in mobi";
+        default:                     return "Unknown error";
+    }
 }
